@@ -1,1 +1,540 @@
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { Calendar, ChevronLeft, ChevronRight, RefreshCw, Settings, X, Save, AlertTriangle, Info, Moon, Sun, FileDown, Loader2, Filter, CalendarDays, Clock, LayoutGrid, Menu, ClipboardList, Search, Trash2, Plus, CheckSquare, Square, UploadCloud, DownloadCloud } from 'lucide-react';
 
+// --- GLOBAL HELPERS ---
+const HOLIDAY_API_URL = "https://raw.githubusercontent.com/guangrei/Json-Indonesia-holidays/main/calendar.json";
+
+const MANUAL_HOLIDAYS = {
+  "2024-12-25": "Hari Raya Natal", "2025-01-01": "Tahun Baru 2025",
+  "2025-01-27": "Isra Mikraj", "2025-01-29": "Imlek 2576",
+  "2025-03-29": "Nyepi 1947", "2025-03-31": "Idul Fitri 1446H",
+  "2025-04-01": "Idul Fitri 1446H", "2025-05-01": "Hari Buruh",
+  "2025-05-12": "Waisak 2569", "2025-05-29": "Kenaikan Isa Al Masih",
+  "2025-06-01": "Lahir Pancasila", "2025-06-06": "Idul Adha 1446H",
+  "2025-06-27": "1 Muharram 1447H", "2025-08-17": "HUT RI ke-80",
+  "2025-09-05": "Maulid Nabi", "2025-12-25": "Natal"
+};
+
+const getDayName = (date) => ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'][new Date(date).getDay()];
+
+// --- LOGIKA WARNA ---
+const getColorFromName = (name) => {
+  if (!name) return "bg-gray-200 border-gray-300";
+  const n = name.toUpperCase();
+
+  if (n.includes("HIJAU PUPUS")) return "bg-lime-300 text-black border-lime-400";
+  if (n.includes("BIRU MUDA") || n.includes("LANGIT")) return "bg-sky-300 text-black border-sky-400";
+
+  if (n.includes("PUTIH")) return "bg-gray-100 text-black border-gray-300"; 
+  if (n.includes("ABU")) return "bg-gray-400 text-black border-gray-500";
+  if (n.includes("BIRU")) return "bg-blue-500 text-white border-blue-600";
+  if (n.includes("KUNING")) return "bg-yellow-400 text-black border-yellow-500";
+  if (n.includes("PINK") || n.includes("MERAH MUDA")) return "bg-pink-400 text-black border-pink-500";
+  if (n.includes("MERAH")) return "bg-red-500 text-white border-red-600";
+  if (n.includes("HIJAU")) return "bg-green-600 text-white border-green-700";
+  if (n.includes("UNGU") || n.includes("VIOLET")) return "bg-purple-500 text-white border-purple-600";
+  if (n.includes("OREN") || n.includes("ORANGE")) return "bg-orange-500 text-white border-orange-600";
+  if (n.includes("HITAM")) return "bg-gray-800 text-white border-gray-600";
+  if (n.includes("COKLAT")) return "bg-yellow-800 text-white border-yellow-900";
+  
+  return "bg-slate-200 text-gray-600 border-slate-300"; 
+};
+
+const useMobileDetect = () => {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 640);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+  return isMobile;
+};
+
+// --- PARSER CSV PINTAR ---
+const parseSmartCSV = (text) => {
+  const rows = [];
+  let currentRow = [];
+  let currentVal = '';
+  let inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+    if (char === '"') {
+      if (inQuote && nextChar === '"') { currentVal += '"'; i++; } else { inQuote = !inQuote; }
+    } else if (char === ',' && !inQuote) {
+      currentRow.push(currentVal); currentVal = '';
+    } else if ((char === '\r' || char === '\n') && !inQuote) {
+      if (char === '\r' && nextChar === '\n') i++;
+      currentRow.push(currentVal); rows.push(currentRow); currentRow = []; currentVal = '';
+    } else { currentVal += char; }
+  }
+  if (currentRow.length > 0 || currentVal) { currentRow.push(currentVal); rows.push(currentRow); }
+  return rows;
+};
+
+// --- PASTE PARSER ---
+const parsePasteData = (text) => {
+    const rows = text.trim().split(/\r\n|\n|\r/);
+    return rows.map(row => row.split('\t'));
+};
+
+// --- MODAL COMPONENTS ---
+const ConfirmationModal = ({ isOpen, title, message, onConfirm, onCancel, isAlertOnly }) => {
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl max-w-md w-full p-6 border border-gray-200 dark:border-gray-700">
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">{title}</h3>
+                <p className="text-gray-600 dark:text-gray-300 mb-6 whitespace-pre-wrap">{message}</p>
+                <div className="flex justify-end gap-3">
+                    {!isAlertOnly && <button onClick={onCancel} className="px-4 py-2 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-md text-sm font-medium transition-colors">Batal</button>}
+                    <button onClick={onConfirm} className={`px-4 py-2 text-white rounded-md text-sm font-medium transition-colors ${isAlertOnly ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'}`}>{isAlertOnly ? 'OK' : 'Ya, Lanjutkan'}</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const PasteModal = ({ isOpen, onClose, onProcess }) => {
+    const [text, setText] = useState("");
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl max-w-2xl w-full p-6 flex flex-col h-[80vh]">
+                <div className="flex justify-between items-center mb-4"><h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2"><ClipboardList className="w-5 h-5"/> Tempel Data dari Excel</h3><button onClick={onClose}><X className="w-5 h-5 text-gray-500"/></button></div>
+                <textarea className="flex-1 w-full border rounded p-3 text-xs font-mono bg-gray-50 dark:bg-gray-900 dark:text-white dark:border-gray-700 focus:ring-2 focus:ring-blue-500 outline-none resize-none" placeholder="Paste data di sini..." value={text} onChange={(e) => setText(e.target.value)}/>
+                <div className="mt-4 flex justify-end gap-3"><button onClick={onClose} className="px-4 py-2 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded text-sm font-medium">Batal</button><button onClick={() => { onProcess(text); setText(""); }} className="px-4 py-2 bg-green-600 text-white hover:bg-green-700 rounded text-sm font-medium" disabled={!text.trim()}>Proses Data</button></div>
+            </div>
+        </div>
+    );
+}
+
+const Popup = ({title, onClose, pos, children}) => (
+    <div className="fixed z-[100] bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-300 dark:border-gray-700 p-3 w-60 animate-in fade-in zoom-in-95" style={{top: pos.y+10, left: Math.min(pos.x, window.innerWidth-250)}}>
+        <div className="flex justify-between items-center mb-2"><h3 className="font-bold text-sm dark:text-white">{title}</h3><button onClick={onClose}><X className="w-4 h-4 dark:text-white"/></button></div>
+        <div className="space-y-1 text-gray-700 dark:text-gray-300">{children}</div>
+    </div>
+);
+
+const SettingsModal = ({onClose, config, setConfig, isDark}) => (
+    <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4">
+        <div className={`w-full max-w-md rounded-lg shadow-xl overflow-hidden ${isDark ? 'bg-gray-800 text-white' : 'bg-white text-gray-800'}`}>
+             <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center"><h3 className="font-bold">Pengaturan</h3><button onClick={onClose}><X className="w-5 h-5"/></button></div>
+             <form onSubmit={(e)=>{e.preventDefault(); onClose();}} className="p-4 space-y-3">
+                 <div><label className="text-sm font-medium">URL Google Sheet</label><input className="w-full border rounded px-2 py-1.5 text-sm dark:bg-gray-700 dark:border-gray-600" value={config.url} onChange={e=>setConfig({...config, url:e.target.value})}/></div>
+                 <div className="grid grid-cols-2 gap-3">
+                     <div><label className="text-sm font-medium">Nama Sheet</label><input className="w-full border rounded px-2 py-1.5 text-sm dark:bg-gray-700 dark:border-gray-600" value={config.sheetName} onChange={e=>setConfig({...config, sheetName:e.target.value})}/></div>
+                     <div><label className="text-sm font-medium">Range</label><input className="w-full border rounded px-2 py-1.5 text-sm dark:bg-gray-700 dark:border-gray-600" value="A:E" disabled/></div>
+                 </div>
+                 <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded text-sm mt-2">Simpan & Refresh</button>
+             </form>
+        </div>
+    </div>
+);
+
+// --- EXPORT PDF HOOK ---
+const usePDFExport = (chartRef, viewStartDate, setViewStartDate, daysToRender, setDaysToRender, isDarkMode, title, dimensions) => {
+    const [isExporting, setIsExporting] = useState(false);
+    useEffect(() => {
+        const loadScript = (src) => new Promise((resolve, reject) => { if (document.querySelector(`script[src="${src}"]`)) return resolve(); const s = document.createElement('script'); s.src = src; s.onload = resolve; s.onerror = reject; document.head.appendChild(s); });
+        Promise.all([loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'), loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js')]).catch(e => console.error("PDF Lib Error", e));
+    }, []);
+    const handleExport = useCallback(async (tasksData) => {
+        if (!chartRef.current || !window.html2canvas || !window.jspdf) return;
+        const isSOData = tasksData.length > 0 && tasksData[0].hasOwnProperty('noSO');
+        let minDate = new Date();
+        if (!isSOData) {
+            if (tasksData.length > 0) {
+                const valid = tasksData.filter(t => !isNaN(new Date(t.start).getTime()));
+                if (valid.length > 0) { valid.sort((a,b) => new Date(a.start) - new Date(b.start)); minDate = new Date(valid[0].start); } else return;
+            } else return;
+        }
+        setIsExporting(true);
+        const originalStart = viewStartDate ? new Date(viewStartDate) : new Date();
+        const originalLen = daysToRender;
+        if (!isSOData) {
+            setViewStartDate(minDate);
+            const isExtruder = title.includes("EXTRUDER");
+            let newRenderLen = 30; 
+            if (isExtruder) {
+                 const valid = tasksData.filter(t => !isNaN(new Date(t.start).getTime()));
+                 valid.sort((a,b) => new Date(a.start) - new Date(b.start));
+                 const lastTask = valid[valid.length - 1];
+                 const end = new Date(lastTask.start);
+                 end.setHours(end.getHours() + lastTask.duration);
+                 const diffHours = Math.ceil((end - minDate) / (1000 * 60 * 60)) + 24; 
+                 newRenderLen = Math.max(48, diffHours);
+                 setDaysToRender(newRenderLen);
+            } else { setDaysToRender(30); }
+        }
+        setTimeout(async () => {
+            try {
+                const element = chartRef.current;
+                const origOverflow = element.style.overflow;
+                const origWidth = element.style.width;
+                element.style.overflow = 'visible'; element.style.width = 'fit-content';
+                const rect = element.getBoundingClientRect();
+                const safeScale = rect.width > 4000 || rect.height > 5000 ? 1.5 : 2;
+                const canvas = await window.html2canvas(element, { scale: safeScale, useCORS: true, backgroundColor: isDarkMode ? '#111827' : '#ffffff', logging: false });
+                element.style.overflow = origOverflow; element.style.width = origWidth;
+                const { jsPDF } = window.jspdf;
+                const pdf = new jsPDF('l', 'mm', 'a4');
+                const pdfW = 297, pdfH = 210, margin = 5, titleY = 10, contentY = 15;
+                const availW = pdfW - margin*2;
+                const addImageToPDF = (imgData, pdf, startPage = true) => {
+                    const imgProps = pdf.getImageProperties(imgData);
+                    const pdfImgH = (imgProps.height * availW) / imgProps.width;
+                    if (startPage) { pdf.setFontSize(14); pdf.setFont("helvetica", "bold"); pdf.text(title, pdfW/2, titleY, { align: "center" }); }
+                    let heightLeft = pdfImgH; let position = contentY; let pageOffset = 0;
+                    pdf.addImage(imgData, 'JPEG', margin, position, availW, pdfImgH);
+                    heightLeft -= (pdfH - contentY - margin);
+                    while (heightLeft > 0) { position -= pdfH; pdf.addPage(); const contentH = pdfH - margin*2; const nextY = margin - ((pdfH - contentY - margin) + (contentH * pageOffset)); pdf.addImage(imgData, 'JPEG', margin, nextY, availW, pdfImgH); heightLeft -= contentH; pageOffset++; }
+                };
+                if (!isSOData && title.includes("EXTRUDER") && dimensions) {
+                    const scale = 2; const sbW = dimensions.sidebar * scale; const cellW = dimensions.cell * scale; const chunkHours = 24; const chunkPx = chunkHours * cellW; const totalHours = daysToRender; const chunks = Math.ceil(totalHours / chunkHours);
+                    for (let i = 0; i < chunks; i++) {
+                        if (i > 0) pdf.addPage(); 
+                        const pageCanvas = document.createElement('canvas'); const ctx = pageCanvas.getContext('2d');
+                        pageCanvas.width = sbW + chunkPx; pageCanvas.height = canvas.height;
+                        ctx.drawImage(canvas, 0, 0, sbW, canvas.height, 0, 0, sbW, canvas.height);
+                        const srcX = sbW + (i * chunkPx);
+                        ctx.drawImage(canvas, srcX, 0, chunkPx, canvas.height, sbW, 0, chunkPx, canvas.height);
+                        const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.95);
+                        pdf.setFontSize(14); pdf.setFont("helvetica", "bold");
+                        const subTitle = `${title} (Part ${i+1})`;
+                        pdf.text(subTitle, pdfW/2, titleY, { align: "center" });
+                        addImageToPDF(pageImgData, pdf, false); 
+                    }
+                } else { const imgData = canvas.toDataURL('image/jpeg', 0.95); addImageToPDF(imgData, pdf, true); }
+                pdf.save(`${title.replace(/\s/g, '_')}.pdf`);
+            } catch (err) { console.error(err); } finally { if(!isSOData) { setViewStartDate(originalStart); setDaysToRender(originalLen); } setIsExporting(false); }
+        }, 1500);
+    }, [chartRef, viewStartDate, daysToRender, isDarkMode, title, setViewStartDate, setDaysToRender, dimensions]);
+    return { isExporting, handleExport };
+};
+
+// --- COMPONENTS: Loom & Extruder (Simplified for brevity, keeping full logic) ---
+const LoomGantt = ({ isDarkMode, isMobile }) => {
+  const [tasks, setTasks] = useState([]);
+  const [viewStartDate, setViewStartDate] = useState(new Date());
+  const [daysToRender, setDaysToRender] = useState(45);
+  const [loading, setLoading] = useState(false);
+  const [sheetConfig, setSheetConfig] = useState({ url: 'https://docs.google.com/spreadsheets/d/1fMkD2pPUV1rU_AXFOctdkY6ejEMMyK0VQgP_NPw1fVI/edit?usp=sharing', sheetName: 'Data_Loom', range: 'A:E' });
+  const [holidays, setHolidays] = useState(MANUAL_HOLIDAYS);
+  const [selectedTask, setSelectedTask] = useState(null);
+  const [selectedHoliday, setSelectedHoliday] = useState(null);
+  const [popupPos, setPopupPos] = useState({x:0, y:0});
+  const [filterRoll, setFilterRoll] = useState("");
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  
+  const chartRef = useRef(null);
+  const { isExporting, handleExport } = usePDFExport(chartRef, viewStartDate, setViewStartDate, daysToRender, setDaysToRender, isDarkMode, "Jadwal Produksi LOOM");
+  const CELL_WIDTH = isMobile ? 45 : 50; const SIDEBAR_WIDTH = isMobile ? 150 : 250; const COL_NO_WIDTH = isMobile ? 45 : 80;
+
+  const fetchData = useCallback(async () => {
+    if(!sheetConfig.url) return; setLoading(true);
+    try {
+        const idMatch = sheetConfig.url.match(/\/d\/([a-zA-Z0-9-_]+)/);
+        if (!idMatch) throw new Error("URL Invalid");
+        const url = `https://docs.google.com/spreadsheets/d/${idMatch[1]}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetConfig.sheetName)}`;
+        const res = await fetch(url); const txt = await res.text();
+        const lines = parseSmartCSV(txt).slice(1);
+        const parsed = lines.map((cols, i) => {
+            let dateStr = cols[3] ? cols[3].replace(/"/g, '') : '';
+            if(dateStr.includes('/')) { const p = dateStr.split('/'); if(p.length===3) dateStr = `${p[2]}-${p[1]}-${p[0]}`; }
+            return { id: i, machineNo: cols[0] || '-', machineName: cols[1] || '-', name: cols[2] || '', start: dateStr, duration: parseInt(cols[4] || 1), color: getColorFromName(cols[2]) };
+        }).filter(t => !isNaN(new Date(t.start).getTime()));
+        setTasks(parsed);
+        if(parsed.length > 0) { const min = parsed.reduce((m, p) => p.start < m ? p.start : m, parsed[0].start); setViewStartDate(new Date(min)); }
+    } catch(e) { console.error(e); } setLoading(false);
+  }, [sheetConfig]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const groups = useMemo(() => {
+     const g = {}; tasks.forEach(t => { if(!g[t.machineNo]) g[t.machineNo] = { ...t, items: [] }; g[t.machineNo].items.push(t); });
+     let arr = Object.values(g).map(gr => { gr.items.sort((a,b) => new Date(a.start) - new Date(b.start)); return gr; });
+     if(filterRoll) arr = arr.filter(gr => gr.items.some(i => i.name === filterRoll));
+     return arr;
+  }, [tasks, filterRoll]);
+
+  const timeline = []; for(let i=0; i<daysToRender; i++) { const d = new Date(viewStartDate); d.setDate(d.getDate() + i); timeline.push(d); }
+  const getOffsetX = (dStr) => { const diff = Math.ceil((new Date(dStr) - viewStartDate) / (1000*60*60*24)); return diff * CELL_WIDTH; };
+  const theme = isDarkMode ? { bg: 'bg-gray-900', txt: 'text-gray-100', border: 'border-gray-700', head: 'bg-gray-800' } : { bg: 'bg-white', txt: 'text-gray-800', border: 'border-gray-200', head: 'bg-white' };
+
+  return (
+    <div className={`flex-1 flex flex-col overflow-hidden relative ${theme.bg}`}>
+      <div className={`flex flex-wrap gap-2 p-2 border-b ${theme.border} items-center justify-between`}>
+        <div className="flex gap-2 items-center">
+             <div className={`flex items-center px-2 py-1 border ${theme.border} rounded max-w-[150px]`}>
+                <Filter className="w-3 h-3 mr-2 text-gray-500"/>
+                <select className={`bg-transparent text-xs w-full outline-none ${theme.txt}`} onChange={e=>setFilterRoll(e.target.value)} value={filterRoll}><option value="">Semua Roll</option>{[...new Set(tasks.map(t=>t.name))].sort().map(n=><option key={n} value={n} className="text-black">{n}</option>)}</select>
+                {filterRoll && <X className="w-3 h-3 ml-1 cursor-pointer text-red-500" onClick={()=>setFilterRoll("")}/>}
+             </div>
+        </div>
+        <div className="flex gap-2">
+            <button onClick={() => handleExport(tasks)} disabled={isExporting} className={`flex items-center gap-1 px-3 py-1.5 border ${theme.border} rounded text-xs hover:bg-gray-100 ${theme.txt}`}>{isExporting ? <Loader2 className="w-3 h-3 animate-spin"/> : <FileDown className="w-3 h-3"/>} PDF</button>
+            <button onClick={()=>setIsSettingsOpen(true)} className={`p-1.5 border ${theme.border} rounded hover:bg-gray-100 ${theme.txt}`}><Settings className="w-4 h-4"/></button>
+            <button onClick={fetchData} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">{loading ? <RefreshCw className="w-3 h-3 animate-spin"/> : 'Sync'}</button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-auto relative custom-scrollbar" ref={chartRef}>
+         <div style={{ width: SIDEBAR_WIDTH + (timeline.length * CELL_WIDTH), minWidth: '100%' }}>
+            <div className={`sticky top-0 z-30 flex ${theme.head} border-b ${theme.border} h-[60px]`}>
+                <div className={`sticky left-0 z-40 flex border-r ${theme.border} ${theme.head}`} style={{width: SIDEBAR_WIDTH}}><div className={`border-r ${theme.border} flex items-center justify-center font-bold text-xs ${theme.txt}`} style={{width: COL_NO_WIDTH}}>No</div><div className={`flex-1 flex items-center justify-center font-bold text-xs ${theme.txt}`}>Nama Mesin</div></div>
+                <div className="flex">{timeline.map((d,i) => {
+                        const dStr = d.toISOString().split('T')[0]; const isHol = MANUAL_HOLIDAYS[dStr] || d.getDay()===0;
+                        return (<div key={i} className={`flex-shrink-0 border-r ${theme.border} flex flex-col items-center justify-center ${isHol ? (isDarkMode ? 'bg-red-900/20' : 'bg-red-50') : ''}`} style={{width: CELL_WIDTH}} onClick={(e) => { if(isHol) { setPopupPos({x: e.clientX, y: e.clientY}); setSelectedHoliday({name: MANUAL_HOLIDAYS[dStr] || 'Hari Minggu'}); } }}>
+                                <span className={`text-[14px] leading-none mb-1 ${isHol ? 'text-red-500 font-bold' : theme.txt}`}>{d.getDate()}</span><span className={`text-[9px] uppercase leading-none ${isHol ? 'text-red-400' : 'text-gray-500'}`}>{d.toLocaleDateString('id',{month:'short'})}</span><span className={`text-[8px] mt-0.5 opacity-70 ${isHol ? 'text-red-400' : 'text-gray-500'}`}>{getDayName(d)}</span></div>)
+                    })}</div>
+            </div>
+            <div className="relative">
+                <div className="absolute inset-0 flex pointer-events-none" style={{paddingLeft: SIDEBAR_WIDTH}}>{timeline.map((d,i) => <div key={i} className={`flex-shrink-0 border-r ${theme.border} h-full`} style={{width: CELL_WIDTH}}/>)}</div>
+                <div className="absolute top-0 bottom-0 border-l-2 border-red-500 z-10" style={{left: SIDEBAR_WIDTH + getOffsetX(new Date().toISOString().split('T')[0])}} />
+                {groups.map(g => (<div key={g.machineNo} className={`flex border-b ${theme.border} h-[45px] hover:bg-black/5`}><div className={`sticky left-0 z-20 flex ${theme.head} border-r ${theme.border}`} style={{width: SIDEBAR_WIDTH}}><div className={`border-r ${theme.border} flex items-center justify-center text-xs font-bold text-blue-600`} style={{width: COL_NO_WIDTH}}>{g.machineNo}</div><div className={`flex-1 flex items-center px-2 text-xs font-semibold truncate ${theme.txt}`}>{g.machineName}</div></div><div className="flex-1 relative">{g.items.map(t => { const left = getOffsetX(t.start); const width = t.duration * CELL_WIDTH; if(left + width < 0) return null; return (<div key={t.id} className="absolute top-2 h-7 group cursor-pointer" style={{left, width}} onClick={(e)=>{e.stopPropagation(); setPopupPos({x:e.clientX, y:e.clientY}); setSelectedTask(t);}}><div className={`absolute inset-0 rounded border ${t.color} hover:brightness-90 flex items-center px-2 overflow-visible`}><span className={`text-[10px] font-bold whitespace-nowrap drop-shadow-sm ${isMobile ? 'bg-white/50 px-1 rounded backdrop-blur-[1px]' : ''}`}>{t.name}</span></div></div>) })}</div></div>))}
+            </div>
+         </div>
+      </div>
+      {selectedTask && <Popup title="Detail" onClose={()=>setSelectedTask(null)} pos={popupPos}><p className="text-xs font-bold">{selectedTask.name}</p><p className="text-xs">Mesin: {selectedTask.machineNo}</p><p className="text-xs">Mulai: {selectedTask.start}</p></Popup>}
+      {selectedHoliday && <Popup title="Info Libur" onClose={()=>setSelectedHoliday(null)} pos={popupPos}><p className="text-xs font-bold text-red-500">{selectedHoliday.name}</p></Popup>}
+      {isSettingsOpen && <SettingsModal onClose={()=>setIsSettingsOpen(false)} config={sheetConfig} setConfig={setSheetConfig} isDark={isDarkMode} />}
+    </div>
+  );
+};
+
+const ExtruderGantt = ({ isDarkMode, isMobile }) => {
+  const [tasks, setTasks] = useState([]);
+  const [viewStartDate, setViewStartDate] = useState(new Date());
+  const [hoursToRender, setHoursToRender] = useState(48); 
+  const [loading, setLoading] = useState(false);
+  const [sheetConfig, setSheetConfig] = useState({ url: 'https://docs.google.com/spreadsheets/d/1fMkD2pPUV1rU_AXFOctdkY6ejEMMyK0VQgP_NPw1fVI/edit?usp=sharing', sheetName: 'Data_Extruder', range: 'A:H' });
+  const [selectedTask, setSelectedTask] = useState(null);
+  const [selectedHoliday, setSelectedHoliday] = useState(null);
+  const [popupPos, setPopupPos] = useState({x:0, y:0});
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [filterBenang, setFilterBenang] = useState(""); 
+  const chartRef = useRef(null);
+  const CELL_WIDTH = isMobile ? 30 : 40;
+  const SIDEBAR_WIDTH = isMobile ? 150 : 250;
+  const { isExporting, handleExport } = usePDFExport(chartRef, viewStartDate, setViewStartDate, hoursToRender, setHoursToRender, isDarkMode, "Jadwal Produksi EXTRUDER", { sidebar: SIDEBAR_WIDTH, cell: CELL_WIDTH });
+  const COL_NO_WIDTH = isMobile ? 45 : 80;
+
+  const fetchData = useCallback(async () => {
+    if(!sheetConfig.url) return; setLoading(true);
+    try {
+        const idMatch = sheetConfig.url.match(/\/d\/([a-zA-Z0-9-_]+)/); if (!idMatch) throw new Error("URL Invalid");
+        const url = `https://docs.google.com/spreadsheets/d/${idMatch[1]}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetConfig.sheetName)}`;
+        const res = await fetch(url); const txt = await res.text();
+        const lines = parseSmartCSV(txt).slice(1);
+        const parsed = lines.map((cols, i) => {
+            let dateStr = cols[3] ? cols[3].replace(/"/g, '') : '';
+            if(dateStr.includes('/')) { const [dPart, tPart] = dateStr.split(' '); const dParts = dPart.split('/'); if(dParts.length === 3) { dateStr = `${dParts[2]}-${dParts[1]}-${dParts[0]}T${tPart || '00:00:00'}`; } } else if (!dateStr.includes('T') && dateStr.includes(' ')) { dateStr = dateStr.replace(' ', 'T'); }
+            const itemName = cols[2] ? cols[2].replace(/"/g, '') : ''; 
+            const duration = parseFloat(cols[4] || 1); const productionResult = cols[6] ? cols[6].replace(/"/g, '') : ''; const mixerCount = cols[7] ? cols[7].replace(/"/g, '') : ''; 
+            let displayText = itemName; if(duration) displayText += ` (${duration}h)`; if(mixerCount) displayText += ` ${mixerCount} MIXER`; if(productionResult) displayText += ` ${productionResult} KG`;
+            return { id: i, machineNo: cols[0] || '-', machineName: cols[1] || '-', name: displayText, originalName: itemName, start: new Date(dateStr), duration: duration, color: getColorFromName(itemName) };
+        }).filter(t => !isNaN(t.start.getTime()));
+        setTasks(parsed);
+        if(parsed.length > 0) {
+            parsed.sort((a,b) => a.start - b.start); const min = parsed[0].start; const max = parsed[parsed.length-1].start; const end = new Date(max); end.setHours(end.getHours() + parsed[parsed.length-1].duration);
+            const totalDiffHours = Math.ceil((end - min) / (1000*60*60)); const startView = new Date(min); startView.setMinutes(0,0,0); setViewStartDate(startView); setHoursToRender(Math.max(48, totalDiffHours + 24)); 
+        }
+    } catch(e) { console.error(e); } setLoading(false);
+  }, [sheetConfig]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const timelineHours = useMemo(() => { const hours = []; for(let i=0; i<hoursToRender; i++) { const d = new Date(viewStartDate); d.setHours(d.getHours() + i); hours.push(d); } return hours; }, [viewStartDate, hoursToRender]);
+  const dateHeaders = useMemo(() => { const headers = []; if(timelineHours.length === 0) return headers; let currentHeader = { date: timelineHours[0], count: 0 }; timelineHours.forEach(h => { if(h.getDate() !== currentHeader.date.getDate()) { headers.push(currentHeader); currentHeader = { date: h, count: 0 }; } currentHeader.count++; }); headers.push(currentHeader); return headers; }, [timelineHours]);
+  const groups = useMemo(() => { const g = {}; tasks.forEach(t => { if(!g[t.machineNo]) g[t.machineNo] = { ...t, items: [] }; g[t.machineNo].items.push(t); }); let arr = Object.values(g); arr.sort((a, b) => a.machineNo.localeCompare(b.machineNo, undefined, { numeric: true, sensitivity: 'base' })); if(filterBenang) arr = arr.filter(gr => gr.items.some(i => i.originalName === filterBenang)); return arr; }, [tasks, filterBenang]);
+  const getOffsetX = (dateObj) => { const diffMs = dateObj - viewStartDate; const diffHours = diffMs / (1000 * 60 * 60); return diffHours * CELL_WIDTH; };
+  const theme = isDarkMode ? { bg: 'bg-gray-900', txt: 'text-gray-100', border: 'border-gray-700', head: 'bg-gray-800' } : { bg: 'bg-white', txt: 'text-gray-800', border: 'border-gray-200', head: 'bg-white' };
+
+  return (
+     <div className={`flex-1 flex flex-col overflow-hidden relative ${theme.bg}`}>
+        <div className={`flex flex-wrap gap-2 p-2 border-b ${theme.border} items-center justify-between`}>
+            <div className="flex gap-2 items-center">
+                 <div className={`flex items-center px-2 py-1 border ${theme.border} rounded max-w-[150px]`}>
+                    <Filter className="w-3 h-3 mr-2 text-gray-500"/>
+                    <select className={`bg-transparent text-xs w-full outline-none ${theme.txt}`} onChange={e=>setFilterBenang(e.target.value)} value={filterBenang}><option value="">Semua Benang</option>{[...new Set(tasks.map(t=>t.originalName))].sort().map(n=><option key={n} value={n} className="text-black">{n}</option>)}</select>
+                    {filterBenang && <X className="w-3 h-3 ml-1 cursor-pointer text-red-500" onClick={()=>setFilterBenang("")}/>}
+                 </div>
+                 <button onClick={() => setHoursToRender(prev => Math.max(12, prev - 12))} className={`p-1 border ${theme.border} rounded text-xs hover:bg-gray-100 ${theme.txt}`}>- 12h</button>
+                 <span className={`text-xs font-bold ${theme.txt}`}>{hoursToRender} Jam View</span>
+                 <button onClick={() => setHoursToRender(prev => prev + 12)} className={`p-1 border ${theme.border} rounded text-xs hover:bg-gray-100 ${theme.txt}`}>+ 12h</button>
+            </div>
+            <div className="flex gap-2">
+                <button onClick={() => handleExport(tasks)} disabled={isExporting} className={`flex items-center gap-1 px-3 py-1.5 border ${theme.border} rounded text-xs hover:bg-gray-100 ${theme.txt}`}>{isExporting ? <Loader2 className="w-3 h-3 animate-spin"/> : <FileDown className="w-3 h-3"/>} PDF</button>
+                <button onClick={()=>setIsSettingsOpen(true)} className={`p-1.5 border ${theme.border} rounded hover:bg-gray-100 ${theme.txt}`}><Settings className="w-4 h-4"/></button>
+                <button onClick={fetchData} className="flex items-center gap-1 px-3 py-1.5 bg-orange-600 text-white rounded text-xs hover:bg-orange-700">{loading ? <RefreshCw className="w-3 h-3 animate-spin"/> : 'Sync'}</button>
+            </div>
+        </div>
+        <div className="flex-1 overflow-auto relative custom-scrollbar" ref={chartRef}>
+            <div style={{ width: SIDEBAR_WIDTH + (timelineHours.length * CELL_WIDTH), minWidth: '100%' }}>
+                 <div className={`sticky top-0 z-30 ${theme.head} border-b ${theme.border}`}>
+                      <div className="flex h-[30px] border-b border-gray-200">
+                          <div className={`sticky left-0 z-40 ${theme.head} border-r ${theme.border}`} style={{width: SIDEBAR_WIDTH}}></div>
+                          {dateHeaders.map((h, i) => {
+                               const dStr = h.date.toISOString().split('T')[0]; const isHol = MANUAL_HOLIDAYS[dStr] || h.date.getDay()===0; const bgHeader = isHol ? (isDarkMode ? 'bg-red-900/20' : 'bg-red-50') : 'bg-blue-50 bg-opacity-50';
+                               return (<div key={i} className={`flex items-center justify-center text-xs font-bold border-r ${theme.border} ${isHol ? 'text-red-500' : theme.txt} ${bgHeader}`} style={{ width: h.count * CELL_WIDTH }} onClick={(e) => { if(isHol) { setPopupPos({x: e.clientX, y: e.clientY}); setSelectedHoliday({name: MANUAL_HOLIDAYS[dStr] || 'Hari Minggu'}); } }}>{h.date.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' })}</div>)
+                          })}
+                      </div>
+                      <div className="flex h-[30px]">
+                          <div className={`sticky left-0 z-40 flex border-r ${theme.border} ${theme.head}`} style={{width: SIDEBAR_WIDTH}}><div className={`border-r ${theme.border} flex items-center justify-center font-bold text-xs ${theme.txt}`} style={{width: COL_NO_WIDTH}}>No Mesin</div><div className={`flex-1 flex items-center justify-center font-bold text-xs ${theme.txt}`}>Nama Mesin</div></div>
+                          {timelineHours.map((h, i) => (<div key={i} className={`flex-shrink-0 border-r ${theme.border} flex items-center justify-center text-[10px] ${theme.txt}`} style={{width: CELL_WIDTH}}>{h.getHours()}:00</div>))}
+                      </div>
+                 </div>
+                 <div className="relative">
+                    <div className="absolute inset-0 flex pointer-events-none" style={{paddingLeft: SIDEBAR_WIDTH}}>{timelineHours.map((_,i) => <div key={i} className={`flex-shrink-0 border-r ${theme.border} h-full`} style={{width: CELL_WIDTH}}/>)}</div>
+                    <div className="absolute top-0 bottom-0 border-l-2 border-red-500 z-10" style={{left: SIDEBAR_WIDTH + getOffsetX(new Date())}} />
+                    {groups.map(g => (
+                        <div key={g.machineNo} className={`flex border-b ${theme.border} h-[45px] hover:bg-black/5`}>
+                             <div className={`sticky left-0 z-20 flex ${theme.head} border-r ${theme.border}`} style={{width: SIDEBAR_WIDTH}}><div className={`border-r ${theme.border} flex items-center justify-center text-xs font-bold text-orange-600`} style={{width: COL_NO_WIDTH}}>{g.machineNo}</div><div className={`flex-1 flex items-center px-2 text-xs font-semibold truncate ${theme.txt}`}>{g.machineName}</div></div>
+                            <div className="flex-1 relative">{g.items.map(t => { const left = getOffsetX(t.start); const width = t.duration * CELL_WIDTH; if(left + width < 0) return null; return (<div key={t.id} className="absolute top-2 h-7 group cursor-pointer" style={{left, width}} onClick={(e)=>{e.stopPropagation(); setPopupPos({x:e.clientX, y:e.clientY}); setSelectedTask(t);}}><div className={`absolute inset-0 rounded border ${t.color} hover:brightness-90 flex items-center px-2 ${isMobile ? 'overflow-visible' : 'overflow-hidden'}`}><span className={`text-[10px] font-bold whitespace-nowrap drop-shadow-sm ${isMobile ? 'bg-white/50 px-1 rounded' : ''}`}>{t.name}</span></div></div>) })}</div>
+                        </div>
+                    ))}
+                 </div>
+            </div>
+        </div>
+        {selectedTask && <Popup title="Detail Extruder" onClose={()=>setSelectedTask(null)} pos={popupPos}><p className="text-xs font-bold">{selectedTask.name}</p><p className="text-xs">Mesin: {selectedTask.machineNo}</p><p className="text-xs">Mulai: {selectedTask.start.toLocaleString()}</p><p className="text-xs">Durasi: {selectedTask.duration} Jam</p></Popup>}
+        {selectedHoliday && <Popup title="Info Libur" onClose={()=>setSelectedHoliday(null)} pos={popupPos}><p className="text-xs font-bold text-red-500">{selectedHoliday.name}</p></Popup>}
+        {isSettingsOpen && <SettingsModal onClose={()=>setIsSettingsOpen(false)} config={sheetConfig} setConfig={setSheetConfig} isDark={isDarkMode} />}
+     </div>
+  );
+};
+
+const SoOutstanding = ({ isDarkMode }) => {
+    const [soData, setSoData] = useState([{ id: Date.now(), noSO: "", tglPesan: "", tglButuh: "", customer: "", sales: "", kode: "", barang: "", specs: "", qtySO: "", real: "", sisa: "", stock: "", checked: false }]);
+    const [scriptUrl, setScriptUrl] = useState("");
+    const [isSyncing, setIsSyncing] = useState(false);
+    const [searchTerm, setSearchTerm] = useState("");
+    const [showUrlInput, setShowUrlInput] = useState(false);
+    const [sheetConfig, setSheetConfig] = useState({ url: 'https://docs.google.com/spreadsheets/d/1fMkD2pPUV1rU_AXFOctdkY6ejEMMyK0VQgP_NPw1fVI/edit?usp=sharing', sheetName: 'SO OUTSTANDING', range: 'A:Z' });
+    const [loading, setLoading] = useState(false);
+    const [confirmModal, setConfirmModal] = useState({ open: false, title: "", message: "", onConfirm: null, isAlertOnly: false });
+    const [pasteModalOpen, setPasteModalOpen] = useState(false);
+    const theme = isDarkMode ? { bg: 'bg-gray-900', txt: 'text-gray-100', border: 'border-gray-700', head: 'bg-gray-800', input: 'bg-gray-800 text-white' } : { bg: 'bg-white', txt: 'text-gray-800', border: 'border-gray-200', head: 'bg-gray-50', input: 'bg-white text-black' };
+
+    const fetchSOData = useCallback(async () => {
+        if(!sheetConfig.url) return; setLoading(true);
+        try {
+            const idMatch = sheetConfig.url.match(/\/d\/([a-zA-Z0-9-_]+)/); if (!idMatch) throw new Error("URL Invalid");
+            const url = `https://docs.google.com/spreadsheets/d/${idMatch[1]}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetConfig.sheetName)}`;
+            const res = await fetch(url); const txt = await res.text();
+            const rows = parseSmartCSV(txt).slice(1);
+            const parsed = rows.map((cols, i) => {
+                if (!cols[0] || cols[0].trim() === "") return null;
+                const cleanNum = (val) => { if(!val) return ""; const n = parseFloat(val.replace(/,/g, '')); return isNaN(n) ? val : n.toLocaleString('en-US'); }
+                return { id: Date.now() + i, noSO: cols[0] || "", tglPesan: cols[1] ? cols[1].replace(/"/g, '') : "", tglButuh: cols[2] ? cols[2].replace(/"/g, '') : "", customer: cols[3] || "", kode: cols[4] || "", barang: cols[5] || "", qtySO: cleanNum(cols[6]), real: cleanNum(cols[7]), sisa: cleanNum(cols[8]), specs: cols[20] || "", sales: cols[21] || "", stock: cleanNum(cols[23]), checked: false };
+            }).filter(r => r !== null);
+            setSoData(parsed);
+        } catch(e) { console.error(e); alert("Gagal mengambil data SO: " + e.message); } setLoading(false);
+    }, [sheetConfig]);
+
+    const handlePasteData = (text) => {
+        const rawRows = parsePasteData(text);
+        const newRows = rawRows.map((cols, i) => {
+            if(cols.length < 1) return null;
+            const cleanNum = (val) => { if(!val) return ""; const n = parseFloat(val.replace(/[^\d.-]/g, '')); return isNaN(n) ? val : n.toLocaleString('en-US'); }
+            return { id: Date.now() + i + Math.random(), noSO: cols[0] || "", tglPesan: cols[1] || "", tglButuh: cols[2] || "", customer: cols[3] || "", sales: cols[4] || "", kode: cols[5] || "", barang: cols[6] || "", specs: cols[7] || "", qtySO: cleanNum(cols[8]), real: cleanNum(cols[9]), sisa: cleanNum(cols[10]), stock: cleanNum(cols[11]), checked: false };
+        }).filter(r => r !== null && r.noSO);
+        setSoData(prev => [...prev, ...newRows]); setPasteModalOpen(false);
+    };
+
+    const handleCellChange = (id, field, value) => setSoData(prev => prev.map(row => row.id === id ? { ...row, [field]: value } : row));
+    const addRow = () => setSoData([...soData, { id: Date.now(), noSO: "", tglPesan: "", tglButuh: "", customer: "", sales: "", kode: "", barang: "", specs: "", qtySO: "", real: "", sisa: "", stock: "", checked: false }]);
+    const toggleCheck = (id) => setSoData(prev => prev.map(row => row.id === id ? { ...row, checked: !row.checked } : row));
+    const toggleSelectAll = () => { const allChecked = soData.every(r => r.checked); setSoData(prev => prev.map(r => ({ ...r, checked: !allChecked }))); };
+    const deleteSelected = () => { const hasSelected = soData.some(r => r.checked); if(!hasSelected) { setConfirmModal({ open: true, title: "Perhatian", message: "Pilih baris yang ingin dihapus terlebih dahulu.", isAlertOnly: true, onConfirm: () => setConfirmModal({ ...confirmModal, open: false }) }); return; } setConfirmModal({ open: true, title: "Hapus Baris?", message: "Hapus baris yang dipilih dari TAMPILAN INI?\n(Data di Google Sheet belum berubah sebelum Anda klik 'Update Sheet')", onConfirm: () => { setSoData(prev => prev.filter(r => !r.checked)); setConfirmModal({ ...confirmModal, open: false }); }, onCancel: () => setConfirmModal({ ...confirmModal, open: false }) }); };
+    const deleteAll = () => { if (soData.length === 0) return; setConfirmModal({ open: true, title: "Hapus Semua Data?", message: "Apakah Anda yakin ingin MENGOSONGKAN seluruh tabel di layar ini?\n(Gunakan ini sebelum menempel data baru)", onConfirm: () => { setSoData([]); setConfirmModal({ ...confirmModal, open: false }); }, onCancel: () => setConfirmModal({ ...confirmModal, open: false }) }); };
+    const handleSyncToSheet = async () => { if (!scriptUrl) { setConfirmModal({ open: true, title: "URL Script Kosong", message: "Masukkan URL Web App Google Script terlebih dahulu!", isAlertOnly: true, onConfirm: () => { setConfirmModal({...confirmModal, open:false}); setShowUrlInput(true); } }); return; } setConfirmModal({ open: true, title: "Update Google Sheet", message: "PERINGATAN PENTING:\n\nData di Google Sheet akan DIHAPUS BERSIH dan diganti dengan data yang ada di layar ini.\n\nPastikan data di layar sudah benar. Lanjutkan Update?", onConfirm: async () => { setConfirmModal({ ...confirmModal, open: false }); await executeSync(); }, onCancel: () => setConfirmModal({ ...confirmModal, open: false }) }); };
+    const executeSync = async () => { setIsSyncing(true); const rowsPayload = soData.map(r => { const row = new Array(24).fill(""); row[0] = r.noSO; row[1] = r.tglPesan; row[2] = r.tglButuh; row[3] = r.customer; row[4] = r.kode; row[5] = r.barang; row[6] = r.qtySO; row[7] = r.real; row[8] = r.sisa; row[20] = r.specs; row[21] = r.sales; row[23] = r.stock; return row; }); const payload = { sheetName: "SO OUTSTANDING", data: rowsPayload }; try { await fetch(scriptUrl, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); alert("Permintaan update dikirim! Silakan periksa Google Sheet Anda."); } catch (error) { console.error("Sync Error:", error); alert("Gagal mengirim data: " + error.message); } finally { setIsSyncing(false); } };
+    const filteredData = soData.filter(item => (item.noSO || "").toLowerCase().includes(searchTerm.toLowerCase()) || (item.customer || "").toLowerCase().includes(searchTerm.toLowerCase()) || (item.barang || "").toLowerCase().includes(searchTerm.toLowerCase()));
+
+    return (
+        <div className={`flex-1 flex flex-col overflow-hidden relative ${theme.bg} ${theme.txt}`}>
+            <ConfirmationModal isOpen={confirmModal.open} title={confirmModal.title} message={confirmModal.message} onConfirm={confirmModal.onConfirm} onCancel={confirmModal.onCancel} isAlertOnly={confirmModal.isAlertOnly} />
+            <PasteModal isOpen={pasteModalOpen} onClose={()=>setPasteModalOpen(false)} onProcess={handlePasteData} />
+            <div className={`flex flex-wrap gap-2 p-2 border-b ${theme.border} items-center justify-between`}>
+                <div className="flex items-center gap-2 w-full md:w-auto"><div className={`flex items-center px-2 py-1 border ${theme.border} rounded w-full max-w-xs`}><Search className="w-4 h-4 mr-2 opacity-50" /><input placeholder="Cari..." className={`bg-transparent text-sm w-full outline-none ${theme.input}`} value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} /></div></div>
+                <div className="flex gap-2 items-center overflow-x-auto">
+                    <button onClick={() => setShowUrlInput(!showUrlInput)} className={`p-1.5 border ${theme.border} rounded hover:bg-gray-100 dark:hover:bg-gray-700`} title="Set Script URL"><Settings className="w-4 h-4"/></button>
+                    <button onClick={addRow} className="flex items-center gap-1 px-3 py-1.5 border border-green-500 text-green-600 rounded text-xs hover:bg-green-50"><Plus className="w-3 h-3"/> Baris</button>
+                    <button onClick={() => setPasteModalOpen(true)} className="flex items-center gap-1 px-3 py-1.5 border border-blue-500 text-blue-600 rounded text-xs hover:bg-blue-50"><ClipboardList className="w-3 h-3"/> Tempel Data</button>
+                    <button onClick={deleteSelected} className="flex items-center gap-1 px-3 py-1.5 border border-red-300 text-red-500 rounded text-xs hover:bg-red-50"><Trash2 className="w-3 h-3"/> Hapus</button>
+                    <button onClick={deleteAll} className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded text-xs hover:bg-red-700">Hapus Semua</button>
+                    <button onClick={fetchSOData} className="flex items-center gap-1 px-4 py-1.5 bg-orange-500 text-white rounded text-xs hover:bg-orange-600">{loading ? <Loader2 className="w-3 h-3 animate-spin"/> : <RefreshCw className="w-3 h-3"/>} Ambil Data</button>
+                    <button onClick={handleSyncToSheet} disabled={isSyncing} className="flex items-center gap-1 px-4 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">{isSyncing ? <Loader2 className="w-3 h-3 animate-spin"/> : <UploadCloud className="w-3 h-3"/>} Update Sheet</button>
+                </div>
+            </div>
+            {showUrlInput && (<div className="p-2 bg-yellow-50 border-b border-yellow-200 flex items-center gap-2"><span className="text-xs font-bold text-yellow-800">GAS URL:</span><input type="text" placeholder="Tempel URL Web App Script di sini..." className="flex-1 text-xs border rounded px-2 py-1" value={scriptUrl} onChange={(e) => setScriptUrl(e.target.value)} /><button onClick={() => setShowUrlInput(false)} className="text-yellow-800"><X className="w-4 h-4"/></button></div>)}
+            <div className="flex-1 overflow-auto"><div className="min-w-[1500px]"> 
+                    <table className="w-full text-left border-collapse text-xs">
+                        <thead className={`sticky top-0 z-10 ${theme.head}`}>
+                            <tr><th className={`p-2 border ${theme.border} w-10 text-center`}><button onClick={toggleSelectAll}>{soData.length > 0 && soData.every(r=>r.checked) ? <CheckSquare className="w-4 h-4"/> : <Square className="w-4 h-4"/>}</button></th><th className={`p-2 border ${theme.border} w-32`}>No SO</th><th className={`p-2 border ${theme.border} w-24`}>Tgl Pesan</th><th className={`p-2 border ${theme.border} w-24`}>Deadline</th><th className={`p-2 border ${theme.border} w-40`}>Customer</th><th className={`p-2 border ${theme.border} w-24`}>Sales</th><th className={`p-2 border ${theme.border} w-24`}>Kode</th><th className={`p-2 border ${theme.border} w-64`}>Nama Barang</th><th className={`p-2 border ${theme.border} w-32`}>Keterangan</th><th className={`p-2 border ${theme.border} w-24 text-right`}>SO</th><th className={`p-2 border ${theme.border} w-24 text-right`}>Realisasi</th><th className={`p-2 border ${theme.border} w-24 text-right`}>Sisa</th><th className={`p-2 border ${theme.border} w-24 text-right`}>Stock</th></tr>
+                        </thead>
+                        <tbody>
+                            {filteredData.map((row) => (
+                                <tr key={row.id} className={`border-b ${theme.border} hover:bg-blue-50 dark:hover:bg-blue-900/20`}>
+                                    <td className={`p-2 border-r ${theme.border} text-center`}><button onClick={() => toggleCheck(row.id)}>{row.checked ? <CheckSquare className="w-4 h-4 text-blue-600"/> : <Square className="w-4 h-4 text-gray-400"/>}</button></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none`} value={row.noSO} onChange={e=>handleCellChange(row.id, 'noSO', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none`} value={row.tglPesan} onChange={e=>handleCellChange(row.id, 'tglPesan', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none text-red-600 font-bold`} value={row.tglButuh} onChange={e=>handleCellChange(row.id, 'tglButuh', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none`} value={row.customer} onChange={e=>handleCellChange(row.id, 'customer', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none`} value={row.sales} onChange={e=>handleCellChange(row.id, 'sales', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none`} value={row.kode} onChange={e=>handleCellChange(row.id, 'kode', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none`} value={row.barang} onChange={e=>handleCellChange(row.id, 'barang', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none`} value={row.specs} onChange={e=>handleCellChange(row.id, 'specs', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none text-right`} value={row.qtySO} onChange={e=>handleCellChange(row.id, 'qtySO', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none text-right`} value={row.real} onChange={e=>handleCellChange(row.id, 'real', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none text-right font-bold text-blue-600`} value={row.sisa} onChange={e=>handleCellChange(row.id, 'sisa', e.target.value)}/></td>
+                                    <td className={`p-1 border-r ${theme.border}`}><input className={`w-full bg-transparent outline-none text-right`} value={row.stock} onChange={e=>handleCellChange(row.id, 'stock', e.target.value)}/></td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    )
+};
+
+// ==========================================
+// 4. MAIN APP (Navigation)
+// ==========================================
+export default function App() {
+  const [activeMenu, setActiveMenu] = useState('LOOM');
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const isMobile = useMobileDetect();
+  const toggleTheme = () => setIsDarkMode(!isDarkMode);
+  const handleMenuClick = (menu) => { setActiveMenu(menu); setIsSidebarOpen(false); };
+
+  return (
+    <div className={`flex h-screen ${isDarkMode ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
+       {isSidebarOpen && <div className="fixed inset-0 bg-black/50 z-40" onClick={() => setIsSidebarOpen(false)}/>}
+       <aside className={`fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-300 ease-in-out shadow-2xl ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} border-r flex flex-col`}>
+          <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+              <h2 className={`font-bold text-lg ${isDarkMode ? 'text-white' : 'text-blue-800'}`}>MKS</h2>
+              <button onClick={() => setIsSidebarOpen(false)}><X className="w-5 h-5 dark:text-white"/></button>
+          </div>
+          <nav className="flex-1 p-2 space-y-1">
+              <button onClick={() => handleMenuClick('LOOM')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeMenu === 'LOOM' ? 'bg-blue-600 text-white' : (isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-blue-50')}`}><CalendarDays className="w-5 h-5"/> Jadwal LOOM</button>
+              <button onClick={() => handleMenuClick('EXTRUDER')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeMenu === 'EXTRUDER' ? 'bg-orange-600 text-white' : (isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-orange-50')}`}><Clock className="w-5 h-5"/> Jadwal EXTRUDER</button>
+              <button onClick={() => handleMenuClick('SO_OUTSTANDING')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeMenu === 'SO_OUTSTANDING' ? 'bg-purple-600 text-white' : (isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-purple-50')}`}><ClipboardList className="w-5 h-5"/> SO OUTSTANDING</button>
+          </nav>
+          <div className="p-4 border-t border-gray-200 dark:border-gray-700">
+             <button onClick={toggleTheme} className={`flex items-center justify-center w-full gap-2 px-3 py-2 border rounded-lg text-sm font-medium transition-colors ${isDarkMode ? 'bg-gray-700 border-gray-600 text-yellow-400' : 'bg-gray-100 border-gray-300 text-gray-600'}`}>{isDarkMode ? <><Sun className="w-4 h-4"/> Light Mode</> : <><Moon className="w-4 h-4"/> Dark Mode</>}</button>
+          </div>
+       </aside>
+       <main className="flex-1 flex flex-col overflow-hidden relative">
+           <div className={`p-2 flex items-center gap-3 border-b ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-200'}`}>
+               <button onClick={() => setIsSidebarOpen(true)} className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"><Menu className="w-6 h-6"/></button>
+               <span className="font-bold text-sm sm:text-lg truncate">{activeMenu === 'LOOM' ? 'Jadwal Produksi (LOOM)' : activeMenu === 'EXTRUDER' ? 'Jadwal Produksi (EXTRUDER)' : 'SO OUTSTANDING'}</span>
+           </div>
+           {activeMenu === 'LOOM' ? <LoomGantt isDarkMode={isDarkMode} isMobile={isMobile} /> : activeMenu === 'EXTRUDER' ? <ExtruderGantt isDarkMode={isDarkMode} isMobile={isMobile} /> : <SoOutstanding isDarkMode={isDarkMode} />}
+       </main>
+    </div>
+  );
+}
